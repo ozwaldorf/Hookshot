@@ -63,8 +63,11 @@ uint64_t rec_seq = 0;                       // (the recordings submitted so far;
 std::vector<uint64_t> rec_open_values;      // (the submissions finished in the recording being made; replay_mu)
 std::mutex rec_map_mu;
 std::map<uint64_t, uint64_t> value_rec;     // submission value (or a recording's own) -> the recording that finished it
-std::unordered_map<uint64_t, uint64_t> q_last;   // queue -> its last submission's value (sync_order_mu)
-std::map<uint64_t, uint64_t> value_queue;   // a submission's value -> its queue (sync_order_mu)
+std::mutex q_values_mu;   // (q_last and value_queue only: lookups that must not wait for a submission's replay)
+std::unordered_map<uint64_t, uint64_t> q_last;   // queue -> its last submission's value (q_values_mu)
+std::map<uint64_t, uint64_t> value_queue;   // a submission's value -> its queue (q_values_mu)
+std::mutex order_cv_mu;
+std::condition_variable order_cv;   // (notified when the stopped queues change: wait() sleeps on it)
 std::atomic<uint64_t> pushed{0};
 std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 std::mutex replay_mu;   // one replay at a time (the game submits from several threads)
@@ -1684,6 +1687,7 @@ void update_blocked() {
     for (const auto& [queue, q] : qruns) n += q.blocked();
     if (n && !blocked_n.load()) blocked_since = std::chrono::steady_clock::now();
     blocked_n = n;
+    order_cv.notify_all();
     if (!n && (!held_tex_releases.empty() || !held_prog_releases.empty())) {   // (the stopped work has gone on: its releases now)
         std::vector<nvn_tex> ts;
         std::vector<nvn_prog> ps;
@@ -1965,9 +1969,13 @@ uint64_t fence();
 /// (hookshot) A fence of one queue (nvnQueueFenceSync): the value of that queue's last submission
 uint64_t fence_q(uint64_t queue) {
     if (async_on() || !sync_waits_on() || per_queue_fences_off() || !queue) return fence();
-    std::lock_guard lk(sync_order_mu);
-    auto it = q_last.find(queue);
-    return it != q_last.end() ? it->second : fence();
+    uint64_t v = 0;
+    {
+        std::lock_guard lk(q_values_mu);
+        auto it = q_last.find(queue);
+        if (it != q_last.end()) v = it->second;
+    }
+    return v ? v : fence();
 }
 int wait(uint64_t f, uint64_t timeout_ns) {
     if (completed() >= f) return 1;
@@ -1975,14 +1983,19 @@ int wait(uint64_t f, uint64_t timeout_ns) {
     // (hookshot) a fence of one queue whose work up to it is recorded whole (none of it stopped): that work, not the other
     // queues' stopped work the timeline above waits for (which a wait for it forced past its waits after RX_VK_WAIT_HOLD_US)
     if (!async_on() && sync_waits_on() && !per_queue_fences_off()) {
-        bool mine = false;
+        bool mine = false, known;
+        uint64_t fq = 0;
         {
-            std::lock_guard lk(sync_order_mu);
+            std::lock_guard lk(q_values_mu);
             auto it = value_queue.find(f);
-            if (it != value_queue.end()) {
-                auto q = qruns.find(it->second);
-                mine = q == qruns.end() || !q->second.blocked() || q->second.oldest() > f;
-            }
+            known = it != value_queue.end();
+            if (known) fq = it->second;
+        }
+        if (known && !blocked_n.load()) mine = true;   // (no queue stopped: its work is recorded whole)
+        else if (known) {
+            std::lock_guard lk(sync_order_mu);
+            auto q = qruns.find(fq);
+            mine = q == qruns.end() || !q->second.blocked() || q->second.oldest() > f;
         }
         int ok = 0;
         if (mine && wait_recorded(f, timeout_ns, &ok)) return ok;
@@ -2008,7 +2021,8 @@ int wait(uint64_t f, uint64_t timeout_ns) {
                 sync_drain(2);
                 break;
             }
-            std::this_thread::yield();
+            std::unique_lock cl(order_cv_mu);
+            order_cv.wait_for(cl, std::chrono::microseconds(200));
         }
     }
     VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
@@ -3362,6 +3376,7 @@ void submit_q(const uint64_t* handles, int n, uint64_t queue) {
             std::vector<uint64_t> h(handles, handles + std::max(n, 0));
             const uint64_t value = ++q_values;
             if (queue) {
+                std::lock_guard vl(q_values_mu);
                 q_last[queue] = value;
                 value_queue[value] = queue;
                 while (value_queue.size() > 8192) value_queue.erase(value_queue.begin());
