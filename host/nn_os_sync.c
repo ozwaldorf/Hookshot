@@ -31,6 +31,7 @@ typedef struct Obj {
     /* queue */
     uint64_t *q;
     int qcap, qhead, qlen;
+    CONDITION_VARIABLE cv_space;   /* (senders waiting for room; cv is for receivers and peekers. Zeroed is initialized) */
     /* condvar */
     uint64_t gen;
     /* (EvilOOT) Horizon's handoff: mutex: condition variable waiters a signal has woken that the mutex is owed to;
@@ -573,9 +574,11 @@ static void event_init(uint64_t key, int signaled, int clear_mode) {
 static void event_signal(Obj *e) {
     AcquireSRWLockExclusive(&e->lk);
     e->signaled = 1;
+    const int one = e->autoclear;   /* (an auto-clear signal lets one waiter through: the others would only sleep again) */
     if (wake_lat_on()) e->sig_ns = hos_now_ns();
     ReleaseSRWLockExclusive(&e->lk);
-    WakeAllConditionVariable(&e->cv);
+    if (one) WakeConditionVariable(&e->cv);
+    else WakeAllConditionVariable(&e->cv);
     poke_multiwait();
 }
 static void event_clear(Obj *e) {
@@ -847,7 +850,8 @@ static void sema_release(Obj *s, int n) {
     s->sem += n;
     if (s->sem_max && s->sem > s->sem_max) s->sem = s->sem_max;
     ReleaseSRWLockExclusive(&s->lk);
-    WakeAllConditionVariable(&s->cv);
+    if (n == 1) WakeConditionVariable(&s->cv);
+    else WakeAllConditionVariable(&s->cv);
     poke_multiwait();
 }
 HLE(_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii) { sema_init(ARG(0), (int)ARG(1), (int)ARG(2)); }
@@ -882,7 +886,7 @@ static int queue_put(Obj *q, uint64_t v, int jam, int try_only) {
     AcquireSRWLockExclusive(&q->lk);
     while (q->qlen == q->qcap) {
         if (try_only) { ReleaseSRWLockExclusive(&q->lk); return 0; }
-        hos_cv_sleep(&q->cv, &q->lk, INFINITE);
+        hos_cv_sleep(&q->cv_space, &q->lk, INFINITE);
     }
     if (jam) {
         q->qhead = (q->qhead + q->qcap - 1) % q->qcap;
@@ -918,7 +922,7 @@ static int queue_get(Obj *q, uint64_t *out, int take, int64_t timeout_ns) {
     }
     ReleaseSRWLockExclusive(&q->lk);
     if (take) {
-        WakeAllConditionVariable(&q->cv);
+        WakeConditionVariable(&q->cv_space);   /* (one slot freed: one sender) */
         poke_multiwait();
     }
     return 1;
@@ -983,8 +987,9 @@ static int rw_try_read(Obj *l) {
 static void rw_unread(Obj *l) {
     AcquireSRWLockExclusive(&l->lk);
     if (l->readers > 0) l->readers--;
+    const int last = l->readers == 0;   /* (readers never wait for readers: only the last one can let a writer in) */
     ReleaseSRWLockExclusive(&l->lk);
-    WakeAllConditionVariable(&l->cv);
+    if (last) WakeAllConditionVariable(&l->cv);
 }
 static int rw_write(Obj *l, int try_only) {
     HosThread *self = hos_self();
