@@ -18,6 +18,10 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <time.h>
+#endif
 
 struct HosThread {
     Ctx ctx;
@@ -371,9 +375,13 @@ HosThread *hos_thread_by_handle(uint32_t h) {
 
 /* Block on the thread's wake event (the kernel layer's lock must not be held). */
 void hos_thread_wait(HosThread *t, int64_t timeout_ns, int *timed_out) {
-    DWORD ms = timeout_ns < 0 ? INFINITE : (DWORD)((timeout_ns + 999999) / 1000000);
     const int away = hos_vcore_away();
+#ifdef __linux__
+    *timed_out = WaitForSingleObjectNs(t->wake, timeout_ns) == WAIT_TIMEOUT;
+#else
+    DWORD ms = timeout_ns < 0 ? INFINITE : (DWORD)((timeout_ns + 999999) / 1000000);
     *timed_out = WaitForSingleObject(t->wake, ms) == WAIT_TIMEOUT;
+#endif
     if (away) hos_vcore_back();
 }
 void hos_thread_wake(HosThread *t) { SetEvent(t->wake); }
@@ -645,6 +653,17 @@ static void sleep_ns(int64_t ns) {
        its job workers 25x longer, ~2000 a second on the frame's critical path). HOS_SHORT_SLEEP_TIMER=1: as before */
     static int short_timer = -1;
     if (short_timer < 0) short_timer = getenv("HOS_SHORT_SLEEP_TIMER") != NULL;
+#ifdef __linux__
+    /* (sched_yield always succeeds on Linux, so the loop below is a syscall storm that takes the core's SMT sibling from
+       a game thread: slept to just before the time with a 1 us timer slack, only the end yielded) */
+    static _Thread_local int slack_set;
+    if (!slack_set) slack_set = 1, prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0);
+    if (ns > 100000 && ns < 1000000 && !short_timer) {   /* (a millisecond and over: the timer below) */
+        const int64_t want = until - 60000;
+        struct timespec ts = {(time_t)(want / 1000000000LL), (long)(want % 1000000000LL)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+    }
+#endif
     if (ns < 1000000 && !short_timer) {
         while (hos_now_ns() < until)
             if (!SwitchToThread()) YieldProcessor();
@@ -1239,9 +1258,19 @@ void hos_vcore_yield(void) {
 /* SleepConditionVariableSRW for guest threads: the core given up for the wait; after it the lock is let go while a
    core is taken again (waiting for a core while holding it could stall the thread that will wake the next waiter),
    so callers see a spurious wake-up and look at their condition again, as they do anyway */
+static BOOL cv_sleep_raw(void *cv, void *lk, int64_t ns) {
+#ifdef __linux__
+    return SleepConditionVariableSRWNs((PCONDITION_VARIABLE)cv, (PSRWLOCK)lk, ns, 0);
+#else
+    return SleepConditionVariableSRW((PCONDITION_VARIABLE)cv, (PSRWLOCK)lk, ns < 0 ? INFINITE : (DWORD)((ns + 999999) / 1000000), 0);
+#endif
+}
 int hos_cv_sleep(void *cv, void *lk, unsigned ms) {
+    return hos_cv_sleep_ns(cv, lk, ms == INFINITE ? -1 : (int64_t)ms * 1000000LL);
+}
+int hos_cv_sleep_ns(void *cv, void *lk, int64_t ns) {
     const int away = hos_vcore_away();
-    const BOOL r = SleepConditionVariableSRW((PCONDITION_VARIABLE)cv, (PSRWLOCK)lk, ms, 0);
+    const BOOL r = cv_sleep_raw(cv, lk, ns);
     if (away) {
         ReleaseSRWLockExclusive((PSRWLOCK)lk);
         hos_vcore_back();
@@ -1257,5 +1286,8 @@ void hos_vcore_checkpoint(void) {}
 void hos_vcore_yield(void) {}
 int hos_cv_sleep(void *cv, void *lk, unsigned ms) {
     return SleepConditionVariableSRW((PCONDITION_VARIABLE)cv, (PSRWLOCK)lk, ms, 0);
+}
+int hos_cv_sleep_ns(void *cv, void *lk, int64_t ns) {
+    return hos_cv_sleep(cv, lk, ns < 0 ? INFINITE : (unsigned)((ns + 999999) / 1000000));
 }
 #endif

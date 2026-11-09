@@ -272,7 +272,7 @@ static int wait_until(Obj *o, int64_t deadline) {
     if (!deadline) return hos_cv_sleep(&o->cv, &o->lk, INFINITE), 1;
     int64_t left = deadline - hos_now_ns();
     if (left <= 0) return 0;
-    hos_cv_sleep(&o->cv, &o->lk, (DWORD)((left + 999999) / 1000000));
+    hos_cv_sleep_ns(&o->cv, &o->lk, left);
     return 1;
 }
 
