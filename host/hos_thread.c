@@ -540,12 +540,14 @@ static const NameSpec *match_name_spec(const NameSpec *s, int n, const char *nam
 /* The last physical core (its logical processors' mask), kept for the Vulkan back end's replay thread (gpu/vk
    vk_replay.cpp pins it there): the game's threads run on the others. The replay is on the frame's critical path
    (MKW waits for the last frame's GPU work before it submits the next), and on a core shared with game threads
-   it ran ~1.7x slower than alone. Only on machines with 8+ logical processors; HOS_RESERVE_CORE=0: none. */
+   it ran ~1.7x slower than alone. Only on machines with 8+ logical processors, and only when that thread exists
+   (RX_VK_ASYNC=1: the default replays on the submitting game thread); HOS_RESERVE_CORE=0: none, =1: always. */
 uint64_t hos_reserved_cpus(void) {
     static uint64_t mask = ~0ull;
     if (mask != ~0ull) return mask;
     mask = 0;
-    if (getenv("HOS_RESERVE_CORE") && !atoi(getenv("HOS_RESERVE_CORE"))) return mask;
+    const char *force = getenv("HOS_RESERVE_CORE"), *async = getenv("RX_VK_ASYNC");
+    if (force ? !atoi(force) : !(async && atoi(async))) return mask;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION info[256];
     DWORD len = sizeof info;
     if (!GetLogicalProcessorInformation(info, &len)) return mask;
