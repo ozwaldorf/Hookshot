@@ -87,19 +87,23 @@ static struct timespec rel_ms(DWORD ms) {
     struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
     return ts;
 }
+/* (a waiter counts itself after reading seq and before sleeping; a waker bumps seq before reading the count. Both
+   sequentially consistent, so a waker that sees no waiter has a waiter whose futex wait sees the new seq and returns) */
 void WakeConditionVariable(CONDITION_VARIABLE *cv) {
     __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);
-    futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL);
+    if (__atomic_load_n(&cv->waiters, __ATOMIC_SEQ_CST)) futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL);
 }
 void WakeAllConditionVariable(CONDITION_VARIABLE *cv) {
     __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);
-    futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL);
+    if (__atomic_load_n(&cv->waiters, __ATOMIC_SEQ_CST)) futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL);
 }
 static BOOL cv_wait(CONDITION_VARIABLE *cv, int64_t ns, void (*unlock)(void *), void (*relock)(void *, ULONG), void *l, ULONG flags) {
     const uint32_t seq = __atomic_load_n(&cv->seq, __ATOMIC_SEQ_CST);
     unlock(l);
     struct timespec ts = {(time_t)(ns / 1000000000LL), (long)(ns % 1000000000LL)};
+    __atomic_add_fetch(&cv->waiters, 1, __ATOMIC_SEQ_CST);
     const long r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, ns < 0 ? NULL : &ts);
+    __atomic_sub_fetch(&cv->waiters, 1, __ATOMIC_SEQ_CST);
     const int timed_out = r == -1 && errno == ETIMEDOUT;
     relock(l, flags);
     if (timed_out) { last_error = ERROR_TIMEOUT; return FALSE; }
