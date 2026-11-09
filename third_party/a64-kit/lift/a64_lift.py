@@ -1364,7 +1364,11 @@ class Lifter:
         pcs = sorted(body)
         dead = {} if os.environ.get("A64_KEEP_FLAGS") else self.dead_flags(body, pcs, texts)
         frame = not os.environ.get("A64_MARK_FRAME")
-        local = local_regs() and e not in self.no_local
+        # (hookshot) a caller of a setjmp owner keeps its registers in the context: after a longjmp only x0-x18 and x30 are
+        # read again (SYNC_BACK), and x19-x29 and SP come back in the context, restored by the guest's longjmp
+        sj = getattr(self, "setjmp_owner", {})
+        local = local_regs() and e not in self.no_local and not any(
+            body[pc][0][0] == "bl" and self.callee(body[pc][0][1]) in sj for pc in body)
         dirty = self.dirty_regs(body, pcs, texts) if local else None
         for i, pc in enumerate(pcs):
             self.cur_i = i
