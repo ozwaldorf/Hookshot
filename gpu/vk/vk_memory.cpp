@@ -1183,33 +1183,44 @@ void memory_drop_shadow(uint64_t guest, uint64_t size) {
 // For invalidate (vk_replay.cpp): a CPU read of GPU results waits until the submission that writes them there is done, as
 // the console's coherent memory has them once that work is. Guest page number -> the recording's timeline value (write-backs
 // from a mirror, and small bindings written in place). RX_VK_NO_READBACK_WAIT=1: none
+// (A two-level table by page, read without a lock: the capture looks up every page it copies. 0: never written back)
 namespace {
-std::mutex wb_pages_mu;
-std::unordered_map<uint32_t, uint64_t> wb_pages;
-uint64_t wb_pruned_at = 0;
+constexpr uint32_t kWbChunkShift = 16;
+std::atomic<std::atomic<uint64_t>*> wb_chunks[(1ull << 32) >> kWbChunkShift];
+std::mutex wb_alloc_mu;   // (only to make a chunk)
+std::atomic<bool> wb_any{false};
+inline uint64_t wb_get(uint32_t page) {
+    const std::atomic<uint64_t>* c = wb_chunks[page >> kWbChunkShift].load(std::memory_order_acquire);
+    return c ? c[page & ((1u << kWbChunkShift) - 1)].load(std::memory_order_relaxed) : 0;
+}
 void wb_pages_note(uint64_t guest_lo, uint64_t guest_hi, uint64_t value) {
     static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
     if (off || !value || guest_hi <= guest_lo) return;
-    std::lock_guard lk(wb_pages_mu);
-    for (uint64_t p = guest_lo >> kPageShift; p <= (guest_hi - 1) >> kPageShift; p++) wb_pages[(uint32_t)p] = value;
-    if (wb_pages.size() > 200000 && mem_completed > wb_pruned_at) {   // (the ones done long ago: kept as "ever" with value 1)
-        for (auto& kv : wb_pages)
-            if (kv.second <= mem_completed) kv.second = 1;
-        wb_pruned_at = mem_completed;
+    for (uint64_t p = guest_lo >> kPageShift; p <= (guest_hi - 1) >> kPageShift; p++) {
+        const uint32_t page = (uint32_t)p;
+        auto& slot = wb_chunks[page >> kWbChunkShift];
+        std::atomic<uint64_t>* c = slot.load(std::memory_order_acquire);
+        if (!c) {
+            std::lock_guard lk(wb_alloc_mu);
+            if (!(c = slot.load(std::memory_order_acquire))) {
+                c = new std::atomic<uint64_t>[1u << kWbChunkShift]();
+                slot.store(c, std::memory_order_release);
+            }
+        }
+        c[page & ((1u << kWbChunkShift) - 1)].store(value, std::memory_order_relaxed);
     }
+    wb_any.store(true, std::memory_order_release);
 }
 } // namespace
 uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever) {
     uint64_t v = 0;
     if (ever) *ever = false;
-    if (!size) return 0;
-    std::lock_guard lk(wb_pages_mu);
-    if (wb_pages.empty()) return 0;
+    if (!size || !wb_any.load(std::memory_order_acquire)) return 0;
     for (uint64_t p = guest >> kPageShift; p <= (guest + size - 1) >> kPageShift; p++) {
-        auto it = wb_pages.find((uint32_t)p);
-        if (it == wb_pages.end()) continue;
+        const uint64_t e = wb_get((uint32_t)p);
+        if (!e) continue;
         if (ever) *ever = true;
-        v = std::max(v, it->second);
+        v = std::max(v, e);
     }
     return v;
 }
@@ -1363,14 +1374,21 @@ std::unique_ptr<Capture> capture_make() {
         uint64_t v = 0;
         if (cap_wait) {
             const uint64_t done = vk_timeline_completed();
-            std::lock_guard lk(wb_pages_mu);
-            if (!wb_pages.empty())
+            if (wb_any.load(std::memory_order_acquire))
                 for (int64_t i = 0; i < n; i++) {
-                    auto it = wb_pages.find(pages[i]);
-                    if (it != wb_pages.end() && it->second > done) v = std::max(v, it->second);
+                    const uint64_t e = wb_get((uint32_t)pages[i]);
+                    if (e > done) v = std::max(v, e);
                 }
         }
-        if (v) vk_timeline_wait(v);
+        if (v) {   // (on the game's thread: how often the capture waits for the GPU)
+            static std::atomic<int64_t> waits{0}, wait_ns{0};
+            const auto t0 = std::chrono::steady_clock::now();
+            vk_timeline_wait(v);
+            const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            const int64_t k = ++waits, total = wait_ns += ns;
+            if (k <= 8 || k % 600 == 0)
+                logf("vk: capture waited for a write-back %lld times, %.1f ms in all (this one %.2f ms)", (long long)k, total / 1e6, ns / 1e6);
+        }
     }
     if (n > 0) {
         c->pages.assign(pages, pages + n);
