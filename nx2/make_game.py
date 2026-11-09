@@ -957,7 +957,10 @@ def main(a=None):
     src = os.path.join(ROOT, "work", "image", "chunks.txt")   # (where the lifted code's files begin: addresses)
     if os.path.exists(src):
         shutil.copy2(src, os.path.join(work, "image", "chunks.txt"))
-    env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1"}
+    env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1",
+           # (guest registers as locals of each lifted function, written back only at calls, returns and exits: without them every
+           # call reloaded the registers a function uses from the context. HOOKSHOT_LOCAL_REGS=0: off)
+           "A64_LOCAL_REGS": os.environ.get("HOOKSHOT_LOCAL_REGS", "31")}
     if os.path.exists(os.path.join(work, "hot_funcs.txt")):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "hookshot_pieces.prof")) and profile_readable(os.path.join(work, "hookshot_pieces.prof")):

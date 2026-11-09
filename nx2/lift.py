@@ -155,6 +155,8 @@ def main():
         print("ADR / ADRP+ADD code addresses outside the %d unwind-covered functions: %d, %d of them new entries" % (
             len(spans), len(refs), len(new)))
     L = a64_lift.Lifter(img)
+    import oot_patches   # (the functions its text edits match keep their registers in the context)
+    L.no_local |= oot_patches.CONTEXT_FUNCS
     if a.standalone:   # (hookshot) widescreen and ultrawide: C after a few of the game's instructions
         import oot_wide
         oot_wide.install(L, img)

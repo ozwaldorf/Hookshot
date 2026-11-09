@@ -21,6 +21,10 @@ import glob
 import os
 import sys
 
+# The functions these edits match by their C text: their guest registers stay in the context (a64_lift.py A64_LOCAL_REGS would
+# write them as locals, xN_, and the edits would no longer find c->x[N])
+CONTEXT_FUNCS = {0x80825aa0, 0x80b1e140, 0x831f3200, 0x81222ce0, 0x810a7b70, 0x80ea2f30, 0x836ce9d0, 0x83b7b340, 0x80b72340,
+                 0x804bd8c0, 0x82c415e0, 0x806d2530, 0x804e48c0}
 DECL = "extern volatile int hos_fixed_resolution;\nextern volatile int hos_dynres_runs;\nextern volatile uint32_t hos_fixed_scale_bits;\n"
 OLD = "if (!((c->x[8] >> 0) & 1)) { goto L_8082640c; }"
 NEW = "if (hos_fixed_resolution || !((c->x[8] >> 0) & 1)) { goto L_8082640c; }\n    hos_dynres_runs++;"
