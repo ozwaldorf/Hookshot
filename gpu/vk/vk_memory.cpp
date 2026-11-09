@@ -1372,22 +1372,46 @@ std::unique_ptr<Capture> capture_make() {
     if (n > 0) {
         static const bool cap_wait = !getenv("RX_VK_CAPTURE_WAIT") || atoi(getenv("RX_VK_CAPTURE_WAIT")) != 0;
         uint64_t v = 0;
+        static thread_local std::vector<uint32_t> pending;   // (the pages that made this capture wait)
+        pending.clear();
         if (cap_wait) {
             const uint64_t done = vk_timeline_completed();
             if (wb_any.load(std::memory_order_acquire))
                 for (int64_t i = 0; i < n; i++) {
                     const uint64_t e = wb_get((uint32_t)pages[i]);
-                    if (e > done) v = std::max(v, e);
+                    if (e > done) v = std::max(v, e), pending.push_back((uint32_t)pages[i]);
                 }
         }
-        if (v) {   // (on the game's thread: how often the capture waits for the GPU)
+        if (v) {   // (on the game's thread: how often the capture waits for the GPU, and for which pages)
             static std::atomic<int64_t> waits{0}, wait_ns{0};
+            static std::mutex by_page_mu;
+            static std::unordered_map<uint32_t, int64_t> by_page;
+            static int64_t pages_pending = 0;
             const auto t0 = std::chrono::steady_clock::now();
             vk_timeline_wait(v);
             const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
             const int64_t k = ++waits, total = wait_ns += ns;
-            if (k <= 8 || k % 600 == 0)
-                logf("vk: capture waited for a write-back %lld times, %.1f ms in all (this one %.2f ms)", (long long)k, total / 1e6, ns / 1e6);
+            std::lock_guard bl(by_page_mu);
+            for (uint32_t p : pending) by_page[p]++;
+            pages_pending += (int64_t)pending.size();
+            if (k <= 8 || k % 600 == 0) {
+                logf("vk: capture waited for a write-back %lld times, %.1f ms in all (this one %.2f ms, %zu of %lld pages pending)",
+                     (long long)k, total / 1e6, ns / 1e6, pending.size(), (long long)n);
+                if (k % 600 == 0) {   // (the pages behind the last 600 waits, the most frequent first)
+                    std::vector<std::pair<int64_t, uint32_t>> top;
+                    for (const auto& [p, c] : by_page) top.push_back({c, p});
+                    std::sort(top.rbegin(), top.rend());
+                    char line[1024];
+                    int len = snprintf(line, sizeof line, "vk: capture waits: %.1f pages pending a wait, %zu pages in all; the most:",
+                                       pages_pending / 600.0, by_page.size());
+                    for (size_t i = 0; i < top.size() && i < 12 && len < 900; i++)
+                        len += snprintf(line + len, sizeof line - len, " %#llx x%lld", (unsigned long long)top[i].second << 12,
+                                        (long long)top[i].first);
+                    logf("%s", line);
+                    by_page.clear();
+                    pages_pending = 0;
+                }
+            }
         }
     }
     if (n > 0) {
