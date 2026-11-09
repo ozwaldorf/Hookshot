@@ -1070,7 +1070,7 @@ void hos_thread_log_handles(void) {
 static SRWLOCK vc_lock = SRWLOCK_INIT;
 static HosThread *vc_owner[8];
 static HosThread *vc_queue[1024];
-static int vc_nq;
+static int vc_nq;   /* (written under vc_lock, sequentially consistent: vc_release reads it without the lock) */
 static struct { int64_t takes, waits, wait_ns, max_ns, escapes, kicks, yields, since; } vc_st;
 
 int hos_vcores_on(void) {
@@ -1111,7 +1111,8 @@ static void vc_take(HosThread *t, int c) {
 static void vc_dequeue(HosThread *t) {
     for (int i = 0; i < vc_nq; i++)
         if (vc_queue[i] == t) {
-            vc_queue[i] = vc_queue[--vc_nq];
+            vc_queue[i] = vc_queue[vc_nq - 1];
+            __atomic_store_n(&vc_nq, vc_nq - 1, __ATOMIC_SEQ_CST);
             break;
         }
     t->vc_queued = 0;
@@ -1158,8 +1159,16 @@ static void vc_acquire(HosThread *t) {
     const int64_t t0 = hos_now_ns();
     t->vc_since = t0;
     t->vc_queued = 1;
-    if (vc_nq < 1024) vc_queue[vc_nq++] = t;
+    if (vc_nq < 1024) vc_queue[vc_nq] = t, __atomic_store_n(&vc_nq, vc_nq + 1, __ATOMIC_SEQ_CST);
     vc_st.waits++;
+    /* (once queued, a core freed by vc_release's lock-free path is seen here or that release sees the queue) */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if ((c = vc_free_for(t)) >= 0) {
+        vc_dequeue(t);
+        vc_take(t, c);
+        ReleaseSRWLockExclusive(&vc_lock);
+        return;
+    }
     for (;;) {
         /* the worst holder worse than t on a core t may use gives it up at its next checkpoint; after
            HOS_VCORE_SLICE_US (2000) of waiting, a holder as good as t does too (a time slice: Horizon would leave
@@ -1214,6 +1223,19 @@ static void vc_acquire(HosThread *t) {
 }
 static void vc_release(HosThread *t) {
     if (!t->vc_held) return;
+    /* nobody waiting: the core freed without the lock. A waiter queued meanwhile looks for a free core after queueing
+       (vc_acquire), and the queue is read again after the core is freed, so one of the two sees the other */
+    if (!__atomic_load_n(&vc_nq, __ATOMIC_SEQ_CST)) {
+        const int c = t->vc_held - 1;
+        t->vc_held = 0;
+        t->vc_kick = 0;
+        __atomic_store_n(&vc_owner[c], NULL, __ATOMIC_SEQ_CST);
+        if (!__atomic_load_n(&vc_nq, __ATOMIC_SEQ_CST)) return;
+        AcquireSRWLockExclusive(&vc_lock);
+        if (!vc_owner[c]) vc_grant(c);
+        ReleaseSRWLockExclusive(&vc_lock);
+        return;
+    }
     AcquireSRWLockExclusive(&vc_lock);
     const int c = t->vc_held - 1;
     vc_owner[c] = NULL;
