@@ -2189,7 +2189,13 @@ NV(nvnQueueSubmitCommands) {
         resolve_deferred((uint8_t *)(uintptr_t)h[i]);
     }
     held_init();
-    if (!hold_on) { rx_nvn_submit_q(h, n, (uint64_t)(uintptr_t)q); return; }
+    if (!hold_on) {
+        /* (the replay runs here, on this thread, for milliseconds: its virtual core goes to the game's other threads meanwhile) */
+        const int away = hos_vcore_away();
+        rx_nvn_submit_q(h, n, (uint64_t)(uintptr_t)q);
+        if (away) hos_vcore_back();
+        return;
+    }
     EnterCriticalSection(&held_cs);
     if (nheld == (LONG)(sizeof held / sizeof *held)) {   /* (full: what is held goes now) */
         for (LONG i = 0; i < nheld; i++) rx_nvn_submit(held[i].h, held[i].n);
