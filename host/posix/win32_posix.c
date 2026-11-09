@@ -50,14 +50,16 @@ static int64_t now_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
-static struct timespec abs_after_ms(DWORD ms) {
+static struct timespec abs_after_ns(int64_t ns) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    ts.tv_sec += ms / 1000;
-    ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+    ts.tv_sec += (time_t)(ns / 1000000000LL);
+    ts.tv_nsec += (long)(ns % 1000000000LL);
     if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
     return ts;
 }
+/* (a Win32 timeout in ms as ns, INFINITE as -1) */
+static int64_t ms_ns(DWORD ms) { return ms == INFINITE ? -1 : (int64_t)ms * 1000000LL; }
 static void monitor_init(pthread_mutex_t *mu, pthread_cond_t *cv) {
     pthread_condattr_t a;
     pthread_condattr_init(&a);
@@ -66,13 +68,13 @@ static void monitor_init(pthread_mutex_t *mu, pthread_cond_t *cv) {
     pthread_condattr_destroy(&a);
     pthread_mutex_init(mu, NULL);
 }
-/* waits for pred() under mu, at most ms: WAIT_OBJECT_0 or WAIT_TIMEOUT */
-#define MONITOR_WAIT(mu, cv, pred, ms, result)                                                                        \
+/* waits for pred() under mu, at most ns (negative: no limit): WAIT_OBJECT_0 or WAIT_TIMEOUT */
+#define MONITOR_WAIT(mu, cv, pred, ns, result)                                                                        \
     do {                                                                                                              \
-        struct timespec until_ = abs_after_ms(ms);                                                                    \
+        struct timespec until_ = abs_after_ns((ns) < 0 ? 0 : (ns));                                                   \
         (result) = WAIT_OBJECT_0;                                                                                     \
         while (!(pred)) {                                                                                             \
-            if ((ms) == INFINITE) pthread_cond_wait((cv), (mu));                                                      \
+            if ((ns) < 0) pthread_cond_wait((cv), (mu));                                                              \
             else if (pthread_cond_timedwait((cv), (mu), &until_) == ETIMEDOUT && !(pred)) { (result) = WAIT_TIMEOUT; break; } \
         }                                                                                                             \
     } while (0)
@@ -93,11 +95,11 @@ void WakeAllConditionVariable(CONDITION_VARIABLE *cv) {
     __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);
     futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL);
 }
-static BOOL cv_wait(CONDITION_VARIABLE *cv, DWORD ms, void (*unlock)(void *), void (*relock)(void *, ULONG), void *l, ULONG flags) {
+static BOOL cv_wait(CONDITION_VARIABLE *cv, int64_t ns, void (*unlock)(void *), void (*relock)(void *, ULONG), void *l, ULONG flags) {
     const uint32_t seq = __atomic_load_n(&cv->seq, __ATOMIC_SEQ_CST);
     unlock(l);
-    struct timespec ts = rel_ms(ms);
-    const long r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, ms == INFINITE ? NULL : &ts);
+    struct timespec ts = {(time_t)(ns / 1000000000LL), (long)(ns % 1000000000LL)};
+    const long r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, ns < 0 ? NULL : &ts);
     const int timed_out = r == -1 && errno == ETIMEDOUT;
     relock(l, flags);
     if (timed_out) { last_error = ERROR_TIMEOUT; return FALSE; }
@@ -111,10 +113,13 @@ static void srw_relock(void *l, ULONG flags) {
 static void cs_unlock(void *l) { pthread_mutex_unlock((pthread_mutex_t *)l); }
 static void cs_relock(void *l, ULONG flags) { (void)flags; pthread_mutex_lock((pthread_mutex_t *)l); }
 BOOL SleepConditionVariableSRW(CONDITION_VARIABLE *cv, SRWLOCK *l, DWORD ms, ULONG flags) {
-    return cv_wait(cv, ms, srw_unlock, srw_relock, l, flags);
+    return cv_wait(cv, ms_ns(ms), srw_unlock, srw_relock, l, flags);
+}
+BOOL SleepConditionVariableSRWNs(CONDITION_VARIABLE *cv, SRWLOCK *l, int64_t ns, ULONG flags) {
+    return cv_wait(cv, ns, srw_unlock, srw_relock, l, flags);
 }
 BOOL SleepConditionVariableCS(CONDITION_VARIABLE *cv, CRITICAL_SECTION *cs, DWORD ms) {
-    return cv_wait(cv, ms, cs_unlock, cs_relock, cs, 0);
+    return cv_wait(cv, ms_ns(ms), cs_unlock, cs_relock, cs, 0);
 }
 void InitializeCriticalSection(CRITICAL_SECTION *cs) {
     pthread_mutexattr_t a;
@@ -456,24 +461,26 @@ BOOL ReleaseSemaphore(HANDLE h, LONG n, LONG *prev) {
     pthread_mutex_unlock(&e->mu);
     return TRUE;
 }
-DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
+DWORD WaitForSingleObject(HANDLE h, DWORD ms) { return WaitForSingleObjectNs(h, ms_ns(ms)); }
+DWORD WaitForSingleObjectNs(HANDLE h, int64_t ns) {
     DWORD r = WAIT_FAILED;
     if (is(h, H_EVENT)) {
         HEvent *e = (HEvent *)h;
         pthread_mutex_lock(&e->mu);
-        MONITOR_WAIT(&e->mu, &e->cv, e->state, ms, r);
+        MONITOR_WAIT(&e->mu, &e->cv, e->state, ns, r);
         if (r == WAIT_OBJECT_0 && !e->manual) e->state = 0;
         pthread_mutex_unlock(&e->mu);
     } else if (is(h, H_SEMA)) {
         HEvent *e = (HEvent *)h;
         pthread_mutex_lock(&e->mu);
-        MONITOR_WAIT(&e->mu, &e->cv, e->count > 0, ms, r);
+        MONITOR_WAIT(&e->mu, &e->cv, e->count > 0, ns, r);
         if (r == WAIT_OBJECT_0) e->count--;
         pthread_mutex_unlock(&e->mu);
     } else if (thread_of(h)) {
         HThread *t = thread_of(h);
         pthread_mutex_lock(&t->mu);
-        MONITOR_WAIT(&t->mu, &t->cv, t->done, ms, r);
+        MONITOR_WAIT(&t->mu, &t->cv, t->done, ns, r);
+
         pthread_mutex_unlock(&t->mu);
     } else if (is(h, H_TIMER)) {
         const int64_t due = ((HTimer *)h)->due;

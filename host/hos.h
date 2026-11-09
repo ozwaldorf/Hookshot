@@ -114,6 +114,7 @@ void hos_vcore_back(void);
 void hos_vcore_checkpoint(void);
 void hos_vcore_yield(void);
 int hos_cv_sleep(void *cv, void *srw_lock, unsigned ms);   /* SleepConditionVariableSRW (exclusive) for guest threads */
+int hos_cv_sleep_ns(void *cv, void *srw_lock, int64_t ns);   /* the same with a timeout in ns (< 0: none) */
 void hos_thread_boost(int level);
 void hos_thread_stack(HosThread *t, uint64_t *addr, uint64_t *size);
 uint64_t *hos_tls_slots(HosThread *t);                     /* nn::os TLS slot values */

@@ -175,6 +175,7 @@ static inline void InitializeConditionVariable(CONDITION_VARIABLE *cv) { cv->seq
 void WakeConditionVariable(CONDITION_VARIABLE *cv);
 void WakeAllConditionVariable(CONDITION_VARIABLE *cv);
 BOOL SleepConditionVariableSRW(CONDITION_VARIABLE *cv, SRWLOCK *l, DWORD ms, ULONG flags);
+BOOL SleepConditionVariableSRWNs(CONDITION_VARIABLE *cv, SRWLOCK *l, int64_t ns, ULONG flags);   /* (ns < 0: no limit) */
 BOOL SleepConditionVariableCS(CONDITION_VARIABLE *cv, CRITICAL_SECTION *cs, DWORD ms);
 BOOL WaitOnAddress(volatile void *addr, void *compare, SIZE_T size, DWORD ms);
 void WakeByAddressSingle(void *addr);
@@ -259,6 +260,8 @@ BOOL ResetEvent(HANDLE e);
 HANDLE CreateSemaphoreA(void *attr, LONG initial, LONG max, LPCSTR name);
 BOOL ReleaseSemaphore(HANDLE s, LONG n, LONG *prev);
 DWORD WaitForSingleObject(HANDLE h, DWORD ms);
+DWORD WaitForSingleObjectNs(HANDLE h, int64_t ns);   /* (ns < 0: no limit) */
+
 DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms);
 void *LocalFree(void *p);
 
