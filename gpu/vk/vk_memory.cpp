@@ -1926,6 +1926,7 @@ void cut_cpu_words(const Pool& p, std::vector<VkBufferCopy>& runs) {
 // (Extracted from the table, not erased: the node, and the Pool in it, stay where they were, so the mirror's lists and
 // a parallel replay thread's pool cache still point at a live one.)
 std::deque<std::map<uint64_t, Pool>::node_type> retired_pools;
+size_t retired_holding = 0;   // (retired pools still holding their import: retired_imports_give_back walks the list only then)
 
 void retire_pool(std::map<uint64_t, Pool>::iterator it) {
     Pool* old = &it->second;
@@ -1940,6 +1941,7 @@ void retire_pool(std::map<uint64_t, Pool>::iterator it) {
     static const bool no_inherit = getenv("RX_VK_NO_INHERIT") != nullptr;
     if (old->mstate == Pool::MIRROR_ON && !no_inherit) old->inherit_pending = true, old->retired_epoch = mirror_epoch;
     pools_gen++;
+    if (old->memory) retired_holding++;
     retired_pools.push_back(imported.extract(it));
     last_pool = nullptr;
     std::fill(std::begin(pool_cache), std::end(pool_cache), nullptr);
@@ -2359,9 +2361,12 @@ void retired_imports_give_back() {   // (pools_mu held)
 #else
     static const bool keep = getenv("RX_VK_KEEP_RETIRED") && getenv("RX_VK_KEEP_RETIRED")[0] != '0';
 #endif
+    // (called for every part of a submission: the walks only when something can be given back or the log line is due)
+    static uint64_t logged_epoch;
+    const bool log_now = mirror_epoch - logged_epoch >= 1200;
+    if (!log_now && (keep || !retired_holding)) return;
     uint64_t live_bytes = 0, retired_bytes = 0;
     size_t retired_alive = 0;
-    for (auto& [lo, p] : imported) live_bytes += p.hi - p.lo;
     for (auto& nh : retired_pools) {
         Pool& p = nh.mapped();
         if (!p.memory) continue;
@@ -2371,13 +2376,14 @@ void retired_imports_give_back() {   // (pools_mu held)
             p.pieces.clear();
             p.buffer = VK_NULL_HANDLE, p.memory = VK_NULL_HANDLE, p.address = 0;
             pools_gen++;
+            retired_holding--;
             continue;
         }
         retired_alive++, retired_bytes += p.hi - p.lo;
     }
-    static uint64_t logged_epoch;
-    if (mirror_epoch - logged_epoch >= 1200) {
+    if (log_now) {
         logged_epoch = mirror_epoch;
+        for (auto& [lo, p] : imported) live_bytes += p.hi - p.lo;
         logf("vk: imports: %zu live (%llu MB), %zu retired still imported (%llu MB), %llu retired given back (%llu MB)",
              imported.size(), (unsigned long long)(live_bytes >> 20), retired_alive, (unsigned long long)(retired_bytes >> 20),
              (unsigned long long)st_retired_imports_freed, (unsigned long long)(st_retired_import_bytes_freed >> 20));
