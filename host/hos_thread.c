@@ -660,7 +660,7 @@ static void sleep_ns(int64_t ns) {
        a game thread: slept to just before the time with a 1 us timer slack, only the end yielded) */
     static _Thread_local int slack_set;
     if (!slack_set) slack_set = 1, prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0);
-    if (ns > 100000 && !short_timer) {
+    if (ns > 100000 && ns < 1000000 && !short_timer) {   /* (a millisecond and over: the timer below) */
         const int64_t want = until - 60000;
         struct timespec ts = {(time_t)(want / 1000000000LL), (long)(want % 1000000000LL)};
         while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
