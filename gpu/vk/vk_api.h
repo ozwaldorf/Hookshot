@@ -51,6 +51,9 @@ enum { HOS_OPT_FOV = 51 };
    and Navi waking Link. 44 stays reserved for Skip title, 49 and 50 for Walk, 60 for the item wheel. A new option id
    answered by the existing option callback does not change MkwVkHost or MkwVkRenderer.) */
 enum { HOS_OPT_SKIP_OPENING = 52 };
+/* (hookshot) the Insert menu's Ultrawide menus: 0 Full width, 1 Extended (host/hos_wide_ui.c: the side panes at the screen's
+   edges), 2 centred with blurred sides, 3 with black bars */
+enum { HOS_OPT_WIDE_MENUS = 53 };
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:

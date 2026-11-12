@@ -162,6 +162,8 @@ static float host_wide_menus(uint32_t keep_mask) {   /* (MkwVkHost.wide_menus) *
     static int looked;
     if (!looked) looked = 1, forced = getenv("HOS_WIDE_KEEP");
     hos_wide_keep_mask = forced ? (uint32_t)strtoul(forced, NULL, 16) : keep_mask;
+    void hos_wide_ui_tick(void);   /* (hos_wide_ui.c: Ultrawide menus' Extended, asked each present) */
+    hos_wide_ui_tick();
     return hos_wide_margin;
 }
 int hos_mouse_pointer(MkwVkPointer *out);   /* display.c, posix/display_sdl.c */

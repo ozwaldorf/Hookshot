@@ -540,7 +540,8 @@ std::atomic<bool> wide_possible{false};   // (a margin and the setting on: vk_re
 WideSides wide_sides() {
     WideSides w;
     if (!host || !host->wide_menus) return w;
-    // (KEEP_VTABLES 1 and 3: the pause and map menus. 0, the item wheel's background, and 2, the fades, keep covering the whole picture)
+    // (KEEP_VTABLES 1 and 3: UICommonScreen, which the menus draw on, and UILoadingFadeScreen. 0, the item wheel's background,
+    // and 2, the event fade, keep covering the whole picture)
     constexpr uint32_t kMenus = 0xa;
     const float margin = host->wide_menus(opts.wide_menus ? 0xfu & ~kMenus : 0xfu);
     extern std::atomic<int64_t> world_drawn_at;
@@ -550,8 +551,11 @@ WideSides wide_sides() {
     // console: its sides are left as the game draws them)
     const bool no_world = presents_now - world_drawn_at.load(std::memory_order_relaxed) > 3 &&
                           presents_now - wheel_drawn_at.load(std::memory_order_relaxed) > 3;
-    wide_possible.store(opts.wide_menus && margin > 0.0f, std::memory_order_relaxed);
-    if (opts.wide_menus && margin > 0.0f && no_world) w.x0 = margin, w.side = opts.wide_menus;
+    // (1, Extended: the menus at their own size as 2 and 3, but their side panes drawn at the screen's edges and spanning
+    // panes the screen's width, host/hos_wide_ui.c: no sides of their own)
+    const bool sides = opts.wide_menus == 2 || opts.wide_menus == 3;
+    wide_possible.store(sides && margin > 0.0f, std::memory_order_relaxed);
+    if (sides && margin > 0.0f && no_world) w.x0 = margin, w.side = opts.wide_menus - 1;   // (1 blurred, 2 black)
     static int told = 0;
     if (w.side != told) {   // (each change logged: a report of blurred sides in play says when they came and went)
         logf("vk: ultrawide menu sides %s at present %lld (the world last drawn at present %lld)", w.side ? "on" : "off",

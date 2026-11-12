@@ -996,10 +996,11 @@ const char* hn_sharpness(int v, int variant) {
 MENU_HINTS(hn_handheld, 0, "As on a TV: the game at the Output resolution's size.",
            "As in the hands: the game at the console's handheld size (1536x864), lighter on the GPU.")
 const char* tx_wide_menus(int v) {
-    static const char* t[] = {"Full width", "Centred, blurred sides", "Centred, black bars"};
-    return t[std::min(std::max(v, 0), 2)];
+    static const char* t[] = {"Full width", "Extended", "Centred, blurred sides", "Centred, black bars"};
+    return t[std::min(std::max(v, 0), 3)];
 }
 MENU_HINTS(hn_wide_menus, 0, "The menus stretched over the whole screen, as before.",
+           "The HUD and menus at their own size, what sits at their sides moved out to the screen's edges.",
            "The menus in the middle 16:9; beside them, what the game draws there, out of focus.",
            "The menus in the middle 16:9; black beside them.")
 /// (the ASTC as RGBA8 row's line while RX_VK_ASTC_RGBA8 holds it: the old readme's way, still in some hookshot_env.txt files)
@@ -1098,7 +1099,7 @@ Row rows[] = {
      "Whether a frame waits for the display's refresh before it is shown. Changes at once.", hn_vsync, false, true},
     {TAB_GRAPHICS, "Window scaling filter", &opts.upscale, 0, 2, 1, tx_filter,
      "How the finished picture is scaled to the window, when its size differs from the Output resolution.", hn_filter},
-    {TAB_GRAPHICS, "Ultrawide menus", &opts.wide_menus, 0, 2, 1, tx_wide_menus,
+    {TAB_GRAPHICS, "Ultrawide menus", &opts.wide_menus, 0, 3, 1, tx_wide_menus,
      "With the Aspect ratio at the monitor's shape: the pause, item and map menus, and what shows beside them. Loading "
      "screens and pre-rendered movies, which draw no world either, get the same sides. Changes at once.", hn_wide_menus, false, true},
     {TAB_GRAPHICS, "HDR", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
@@ -1786,8 +1787,9 @@ void save() {
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load; 4: Descriptor reuse on by default, see menu_init and vk_draw.cpp desc_slotgen_on; 5: the
         // Menu shortcut "Insert, F1 or Esc" by default, see menu_init; 6: the Aspect ratio's 16:9 from before moves on a
-        // screen narrower than 16:9, see menu_init and host/hos_wide_size.h)
-        fprintf(f, "options_version=6\n");
+        // screen narrower than 16:9, see menu_init and host/hos_wide_size.h; 7: Ultrawide menus' Extended
+        // before the centred ones, see menu_init)
+        fprintf(f, "options_version=7\n");
         fputs(others.c_str(), f);
         if (!can_bind()) fputs(kept.c_str(), f);
         for (int i = 0; i < HOS_KEY_N && can_bind(); i++) {   // (the stick's and camera's rows, HOS_KEY_MOVE_*/CAM_*, have no pad_ line; the ocarina note rows do)
@@ -3982,6 +3984,9 @@ void menu_init() {
             const float started = host->aspect_ratio();
             if (started > 1.0f && started < 16.0f / 9.0f * 0.99f) opts.ultrawide = 1;
         }
+        // (Ultrawide menus' Extended is 1 from options_version 7, before the centred ones: a file from before had them at 1 and
+        // 2; 3, past the last then, is Extended too)
+        if (version < 7) opts.wide_menus = opts.wide_menus == 3 ? 1 : opts.wide_menus >= 1 ? opts.wide_menus + 1 : 0;
     }
     first_start = !has_options;
     // An opt-in profile for 4 GB cards: keep existing options authoritative, but make a first run usable on

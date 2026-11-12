@@ -73,6 +73,44 @@ THUMB = ("{ extern volatile float hos_wide_ratio; const float _r = hos_wide_rati
          "c->x[2] = (uint32_t)((306 - _h) / 2); c->x[4] = (uint32_t)_h; } } }"
          "   /* (nx2/oot_wide.py: the save's picture, the middle 16:9) */")
 
+# Ultrawide menus: Extended (host/hos_wide_ui.c). A 2D layout pane's final transform is made by f_8154cab0 (main+0x152cab0) when
+# its dirty bit 6 is set (f_8154caa0 checks it and falls into it); the pane is x0 there and x19 in it. The parent it multiplies
+# by is x0 after main+0x152cdd4; main+0x152cd98 is where every path without one joins. The translation is stored at
+# main+0x152ce64, before the stored transform is read back to tell whether the children need theirs remade. f_8154ac30 reads a
+# pane's size as drawn (ldp s0, s1, [x0, #0x58]). f_8154a730, the calculate pass, skips a pane with no dirty bits at all.
+# A picture's draw: f_815505b0 packs its record into the frame's constants (the call to f_8154f1c0 returns them at sp + 8,
+# read into x8, x9 at main+0x15306f4), the drawer keeps them at +0x48; f_81550720 (main+0x1530720) draws with them. The pause
+# menu's background is drawn in pieces there. f_81545d60 builds a layout's panes (the layout x19 after it, main+0x1525ca0).
+UI_FORCE = ("{ extern volatile uint32_t hos_wide_ui_force; if (hos_wide_ui_force) c->x[8] |= 0x40; }"
+            "   /* (nx2/oot_wide.py: every pane remakes its transform) */")
+# (the calculate pass, f_8154a730, returns at once for a pane with no dirty bits: a pane that never changes would never remake
+# its transform. While forced its bit 6 is set where the pass reads the bits, so it reaches f_8154caa0)
+UI_FORCE_PASS = ("{ extern volatile uint32_t hos_wide_ui_force; if (hos_wide_ui_force) { c->x[8] |= 0x40; "
+                 "recomp_store32(c, c->x[0], (uint32_t)c->x[8]); } }   /* (nx2/oot_wide.py: every pane remakes its transform) */")
+UI_PARENT = ("{ extern void hos_wide_ui_parent(uint64_t parent); hos_wide_ui_parent(%s); }"
+             "   /* (nx2/oot_wide.py: the pane's parent) */")
+UI_PLACED = ("{ extern void hos_wide_ui_placed(Ctx *c, uint64_t pane); hos_wide_ui_placed(c, c->x[19]); }"
+             "   /* (nx2/oot_wide.py: side panes at the screen's edges) */")
+UI_SIZE = ("{ extern void hos_wide_ui_size(Ctx *c, uint64_t pane); hos_wide_ui_size(c, c->x[0]); }"
+           "   /* (nx2/oot_wide.py: spanning panes the screen's width) */")
+UI_BG = ("{ extern void hos_wide_ui_bg(Ctx *c); hos_wide_ui_bg(c); }"
+         "   /* (nx2/oot_wide.py: the pause menu's background in pieces) */")
+UI_BG_DRAW = ("{ extern void hos_wide_ui_bg_draw(Ctx *c); hos_wide_ui_bg_draw(c); }"
+              "   /* (nx2/oot_wide.py: the pause menu's background in pieces) */")
+UI_BUILT = ("{ extern void hos_wide_ui_built(Ctx *c, uint64_t layout); hos_wide_ui_built(c, c->x[19]); }"
+            "   /* (nx2/oot_wide.py: a list widened as it is built) */")
+UI_SITES = (
+    (0x152a730, 0xb9400008, UI_FORCE_PASS),         # ldr w8, [x0]: the calculate pass's first look at the dirty bits
+    (0x152caa0, 0xb9400008, UI_FORCE),              # ldr w8, [x0]: the pane's dirty bits
+    (0x152cd98, 0xad4207e0, UI_PARENT % "0"),       # ldp q0, q1, [sp, #0x40]: no parent
+    (0x152cdd4, 0xb9403008, UI_PARENT % "c->x[0]"), # ldr w8, [x0, #0x30]: the parent's transform
+    (0x152ce64, 0xfc04c263, UI_PLACED),             # stur d3, [x19, #0x4c]: the translation stored
+    (0x152ac40, 0x2d4b0400, UI_SIZE),               # ldp s0, s1, [x0, #0x58]: the size as drawn
+    (0x15306f4, 0xa940a7e8, UI_BG),                 # ldp x8, x9, [sp, #8]: a picture's constants packed, before the drawer keeps them
+    (0x1530740, 0xaa0003f6, UI_BG_DRAW),            # mov x22, x0: a picture drawn (the drawer x0, x1 what it draws with)
+    (0x1525ca0, 0x91004260, UI_BUILT),              # add x0, x19, #0x10: a layout's panes built (f_81545d60 returned)
+)
+
 # (main offset, the original instruction word there, the C after it)
 SITES = (
     # the picture: the graphics setup and the display settings object build {2560, 1440} in x8 (mov, then this movk)
@@ -93,7 +131,7 @@ SITES = (
     (0x3b5c758, 0xa941a269, MOVIE),
     # the viewport helper's SetViewport, after the call's address is loaded (ldr x8, [x8]), before blr x8
     (0x284824, 0xf9400108, THUMB),
-)
+) + UI_SITES
 
 
 def install(lifter, img):
