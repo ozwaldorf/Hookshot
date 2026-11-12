@@ -21,8 +21,12 @@ UI_M00, UI_M11 = "(2.0f / 3840.0f)", "(2.0f / 2160.0f)"   # (the UI's full-scree
 # whole; the Insert menu's Ultrawide menus row clears the menus' bits 1 and 3 (vk_framegen.cpp): their layout then
 # keeps its 16:9 shape in the middle, as the HUD's does, instead of being stretched over the whole picture. Bit 0, the
 # item wheel's background (the last frame of play, blurred, HUD and all), and bit 2, the fades, keep covering it all: bit 0
-# cleared, that capture went into the middle at twice its width)
+# cleared, that capture went into the middle at twice its width. By the class each vtable's factory makes:
+# UIShortCutBGScreen, UICommonScreen, UIEventFadeScreen, UILoadingFadeScreen)
 KEEP_VTABLES = (MAIN + 0x4bed098, MAIN + 0x4be4fb0, MAIN + 0x4be61c8, MAIN + 0x4be7b30)
+# (another screen that keeps one of those bits: UISystemOverlayScreen. Squeezed, the item quick select's background
+# went into the middle 16:9 from its first opening on)
+KEEP_ALSO = ((MAIN + 0x4bef4a0, 0),)
 
 
 def _ratio(vreg, base=None):
@@ -46,7 +50,8 @@ HUD = ("{ extern volatile float hos_wide_squeeze; const float _q = hos_wide_sque
        "extern volatile uint32_t hos_wide_keep_mask; const uint32_t _kb = %s; "
        "if (!(_kb & hos_wide_keep_mask)) { float _row[4]; memcpy(_row, c->vreg[1], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _q; "
        "memcpy(c->vreg[1], _row, 16); } } } }   /* (nx2/oot_wide.py: HUD in the middle 16:9) */"
-       % (UI_M00, UI_M11, " : ".join("_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)) + " : 0u"))
+       % (UI_M00, UI_M11, " : ".join(["_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)] +
+                                     ["_vt == 0x%xULL ? %du" % (v, 1 << k) for v, k in KEEP_ALSO]) + " : 0u"))
 
 MOVIE = ("{ extern volatile float hos_wide_margin; const float _m = hos_wide_margin; if (_m > 0.0f) { "
          "const uint64_t _vp = c->x[29] - 40; uint32_t _ua = (uint32_t)recomp_load32(c, _vp + 8), _ub = (uint32_t)recomp_load32(c, _vp + 16); "
